@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
-from flask import Flask, request, redirect
+from werkzeug import Request, Response
+from werkzeug.serving import make_server
 import configparser
 import datetime
+import logging
 import os 
 import threading
 import time
@@ -10,10 +12,12 @@ import tweepy
 import webbrowser
 
 
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-
-
 def auth_handler(access_token):
+    try:
+        webserver.shutdown()
+    except NoneType:
+        pass
+
     config["auth"]["access_token"] = access_token
 
     with open("config.ini", "w") as f:
@@ -45,7 +49,6 @@ def purge_tweets(client):
                 print(tweet.data["id"])
     except Exception as e:
         print(e)
-        exit()
 
     print(f"Done! Deleted {deleted_tweets} Tweets...")
 
@@ -60,8 +63,8 @@ if __name__ == "__main__":
     if not "auth" in config:
         config["auth"] = {}
 
-    flask_host = config["defaults"].get("flask_host", "127.0.0.1")
-    flask_port = config["defaults"].get("flask_port", 33333)
+    http_host = config["defaults"].get("http_host", "127.0.0.1")
+    http_port = config["defaults"].get("http_port", 33333)
 
     delete_like_threshold = int(config["defaults"].get("delete_like_threshold", 50))
     delete_days_threshold = int(config["defaults"].get("delete_days_threshold", 7))
@@ -82,7 +85,7 @@ if __name__ == "__main__":
         config.write(f)
 
     if access_token is None:
-        redirect_uri = f"http://{flask_host}:{flask_port}"
+        redirect_uri = f"http://{http_host}:{http_port}"
 
         oauth2_user_handler = tweepy.OAuth2UserHandler(
             client_id=client_id,
@@ -93,20 +96,25 @@ if __name__ == "__main__":
 
         auth_url = oauth2_user_handler.get_authorization_url()
 
-        app = Flask(__name__)
-        webserver = threading.Thread(target=lambda: app.run(host=flask_host, port=flask_port, debug=False, use_reloader=False)).start()
+        log = logging.getLogger("werkzeug")
+        log.setLevel(logging.ERROR)
 
-        @app.route("/", methods=["GET"])
-        def get_auth():
+        @Request.application
+        def get_auth(request):
+            os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
             response_uri = f"{redirect_uri}/?{request.query_string.decode()}"
             access_token = oauth2_user_handler.fetch_token(response_uri)["access_token"]
 
             threading.Thread(target=lambda: auth_handler(access_token)).start()
 
-            return redirect("https://twitter.com")
+            return Response("success\n<meta http-equiv=\"refresh\" content=\"3; URL=http://twitter.com/\">", mimetype="text/html")
 
+        webserver = make_server(http_host, http_port, get_auth)
+        threading.Thread(target=webserver.serve_forever).start()
 
         print(f"Opening {auth_url}...")
+
         webbrowser.open(auth_url, new=0, autoraise=True)
     else:
         auth_handler(access_token)

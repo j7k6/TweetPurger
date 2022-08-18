@@ -7,32 +7,69 @@ import datetime
 import logging
 import os 
 import threading
-import time
 import tweepy
 import webbrowser
+
+
+def get_access_token():
+    global webserver
+
+    redirect_uri = f"http://{http_host}:{http_port}"
+
+    oauth2_user_handler = tweepy.OAuth2UserHandler(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scope=["tweet.read", "tweet.write", "users.read", "bookmark.read"],
+        client_secret=client_secret
+    )
+
+    auth_url = oauth2_user_handler.get_authorization_url()
+
+    log = logging.getLogger("werkzeug")
+    log.setLevel(logging.ERROR)
+
+    @Request.application
+    def get_auth(request):
+        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
+        response_uri = f"{redirect_uri}/?{request.query_string.decode()}"
+        access_token = oauth2_user_handler.fetch_token(response_uri)["access_token"]
+
+        threading.Thread(target=lambda: auth_handler(access_token)).start()
+
+        return Response("success\n<meta http-equiv=\"refresh\" content=\"3; URL=http://twitter.com/\">", mimetype="text/html")
+
+    webserver = make_server(http_host, http_port, get_auth)
+    threading.Thread(target=webserver.serve_forever).start()
+
+    print(f"Opening {auth_url}...")
+
+    webbrowser.open(auth_url, new=0, autoraise=True)
 
 
 def auth_handler(access_token):
     try:
         webserver.shutdown()
-    except NoneType:
+    except:
         pass
 
-    config["auth"]["access_token"] = access_token
+    try:
+        client = tweepy.Client(access_token)
+        user = client.get_me(user_auth=False).data
 
-    with open("config.ini", "w") as f:
-        config.write(f)
+        print("Login successful!")
 
-    client = tweepy.Client(access_token)
+        config["auth"]["access_token"] = access_token
 
-    print("Login successful!")
+        with open("config.ini", "w") as f:
+            config.write(f)
     
-    purge_tweets(client)
+        purge_tweets(client, user)
+    except Exception as e:
+        print(e)
 
 
-def purge_tweets(client):
-    user = client.get_me(user_auth=False).data
-
+def purge_tweets(client, user):
     print(f"Purging Tweets for @{user} ({user.id})")
 
     try:
@@ -85,36 +122,6 @@ if __name__ == "__main__":
         config.write(f)
 
     if access_token is None:
-        redirect_uri = f"http://{http_host}:{http_port}"
-
-        oauth2_user_handler = tweepy.OAuth2UserHandler(
-            client_id=client_id,
-            redirect_uri=redirect_uri,
-            scope=["tweet.read", "tweet.write", "users.read", "bookmark.read"],
-            client_secret=client_secret
-        )
-
-        auth_url = oauth2_user_handler.get_authorization_url()
-
-        log = logging.getLogger("werkzeug")
-        log.setLevel(logging.ERROR)
-
-        @Request.application
-        def get_auth(request):
-            os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-
-            response_uri = f"{redirect_uri}/?{request.query_string.decode()}"
-            access_token = oauth2_user_handler.fetch_token(response_uri)["access_token"]
-
-            threading.Thread(target=lambda: auth_handler(access_token)).start()
-
-            return Response("success\n<meta http-equiv=\"refresh\" content=\"3; URL=http://twitter.com/\">", mimetype="text/html")
-
-        webserver = make_server(http_host, http_port, get_auth)
-        threading.Thread(target=webserver.serve_forever).start()
-
-        print(f"Opening {auth_url}...")
-
-        webbrowser.open(auth_url, new=0, autoraise=True)
+        get_access_token()
     else:
         auth_handler(access_token)

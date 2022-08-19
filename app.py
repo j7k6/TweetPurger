@@ -20,7 +20,7 @@ class OAuth2UserHandler(tweepy.OAuth2UserHandler):
             "https://api.twitter.com/2/oauth2/token",
             refresh_token=refresh_token,
             auth=self.auth,
-			body="client_id="+self.client_id
+            body="client_id="+self.client_id
         )
 
 
@@ -30,6 +30,7 @@ class TweetPurger:
         self.client_secret = client_secret
         self.consumer_secret = consumer_secret
         self.access_token = access_token
+        self.refresh_token = refresh_token
 
         self.dry_run = dry_run
 
@@ -37,9 +38,6 @@ class TweetPurger:
         self.auth_http_port = auth_http_port
         self.auth_timeout = auth_timeout
         self.redirect_uri = f"http://{self.auth_http_host}:{self.auth_http_port}"
-
-        self.refresh_token = refresh_token
-        self.token_expire_time = None
 
         self.auth_server = None
         self.client = None
@@ -87,7 +85,6 @@ class TweetPurger:
 
         self.access_token = auth_response["access_token"]
         self.refresh_token = auth_response["refresh_token"]
-        self.token_expire_time = datetime.datetime.fromtimestamp(float(auth_response["expires_at"]))
 
         self.config.read(self.config_path)
         self.config["auth"]["access_token"] = self.access_token
@@ -98,14 +95,6 @@ class TweetPurger:
 
         self.client = tweepy.Client(self.access_token, wait_on_rate_limit=True)
         self.user = self.client.get_me(user_auth=False).data
-
-
-    def renew_token(self):
-        print("Renewing access_token...")
-
-        auth = self.oauth2_user_handler.refresh_token(self.refresh_token)
-
-        self.token_handler(auth)
 
 
     def get_token(self):
@@ -143,7 +132,15 @@ class TweetPurger:
             exit()
 
 
-    def parse_archive(self, archive_path, end_time=datetime.datetime.now()):
+    def renew_token(self):
+        print("Renewing access_token...")
+
+        auth = self.oauth2_user_handler.refresh_token(self.refresh_token)
+
+        self.token_handler(auth)
+
+
+    def parse_archive(self, archive_path, end_time=datetime.datetime.now(), archive_last_id=None):
         try:
             with open(archive_path) as f:
                 tweets_raw = f.readlines()
@@ -151,7 +148,13 @@ class TweetPurger:
             tweets_raw[0] = "["
             tweets = [t["tweet"] for t in json.loads("\n".join(tweets_raw))]
 
-            return list(filter(lambda tweet: datetime.datetime.strptime(tweet["created_at"], "%a %b %d %H:%M:%S +0000 %Y") < end_time, tweets))
+            archive_tweets = list(filter(lambda t: datetime.datetime.strptime(t["created_at"], "%a %b %d %H:%M:%S +0000 %Y") < end_time, tweets))
+            archive_tweets.sort(key=lambda t: int(t["id"]), reverse=True)
+
+            if archive_last_id is not None:
+                archive_tweets = list(filter(lambda t: int(t["id"]) < int(archive_last_id), archive_tweets))
+
+            return archive_tweets
         except Exception as e:
             print(e)
             print("Failed to read Archive!")
@@ -181,7 +184,7 @@ class TweetPurger:
         return True
 
 
-    def run(self, delete_like_threshold=50, delete_days_threshold=7, archive=False, archive_path="tweet.js"):
+    def run(self, delete_like_threshold=50, delete_days_threshold=7, archive=False, archive_path="tweet.js", archive_last_id=None):
         print(f"Purging Tweets for @{self.user} ({self.user.id})")
 
         deleted_tweets = 0
@@ -196,10 +199,15 @@ class TweetPurger:
 
                 archive_path = os.path.abspath(archive_path)
 
-                for tweet in self.parse_archive(archive_path, end_time):
+                for tweet in self.parse_archive(archive_path, end_time, archive_last_id):
                     if int(tweet["favorite_count"]) < delete_like_threshold and not int(tweet["id"]) in bookmarks:
                         if self.dry_run is False:
                             if self.delete_tweet(tweet["id"]):
+                                self.config["defaults"]["archive_last_id"] = tweet["id"]
+
+                                with open(self.config_path, "w") as f:
+                                    self.config.write(f)
+            
                                 deleted_tweets += 1
 
                         print(tweet["id"])
@@ -233,6 +241,7 @@ if __name__ == "__main__":
     parser.add_argument("--auth-timeout")
     parser.add_argument("--archive", action="store_true")
     parser.add_argument("--archive-path")
+    parser.add_argument("--archive-last-id")
     parser.add_argument("--config-path")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -249,6 +258,7 @@ if __name__ == "__main__":
             config[section] = {}
 
     archive_path = os.path.abspath(args.archive_path or config["defaults"].get("archive_path", "tweet.js"))
+    archive_last_id = args.archive_last_id or config["defaults"].get("archive_last_id", None)
 
     auth_http_host = args.auth_http_host or config["defaults"].get("auth_http_host", "127.0.0.1")
     auth_http_port = int(args.auth_http_port or config["defaults"].get("auth_http_port", 33333))
@@ -274,4 +284,4 @@ if __name__ == "__main__":
         config.write(f)
 
     tweet_purger = TweetPurger(client_id, client_secret, consumer_secret, access_token, refresh_token, dry_run, config_path, auth_http_host, auth_http_port, auth_timeout)
-    tweet_purger.run(delete_like_threshold, delete_days_threshold, archive, archive_path)
+    tweet_purger.run(delete_like_threshold, delete_days_threshold, archive, archive_path, archive_last_id)

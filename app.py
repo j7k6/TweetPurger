@@ -66,15 +66,13 @@ class TweetPurger:
             try:
                 self.user = self.client.get_me(user_auth=False).data
             except tweepy.errors.Unauthorized as e:
-                print("access_token expired or invalid!")
-
                 self.access_token = None
                 self.get_token()
         else:
             self.get_token()
 
 
-    def token_handler(self, auth_response):
+    def auth_handler(self, auth_response):
         if self.auth_server is not None:
             try:
                 self.auth_server.shutdown()
@@ -105,7 +103,7 @@ class TweetPurger:
             auth_response_uri = f"{self.redirect_uri}/?{request.query_string.decode()}"
             auth = self.oauth2_user_handler.fetch_token(auth_response_uri)
 
-            threading.Thread(target=lambda: self.token_handler(auth)).start()
+            threading.Thread(target=lambda: self.auth_handler(auth)).start()
 
             return Response("success\n<meta http-equiv=\"refresh\" content=\"3; URL=http://twitter.com/\">", mimetype="text/html")
 
@@ -137,7 +135,7 @@ class TweetPurger:
 
         auth = self.oauth2_user_handler.refresh_token(self.refresh_token)
 
-        self.token_handler(auth)
+        self.auth_handler(auth)
 
 
     def parse_archive(self, archive_path, end_time=datetime.datetime.now(), archive_last_id=None):
@@ -149,10 +147,11 @@ class TweetPurger:
             tweets = [t["tweet"] for t in json.loads("\n".join(tweets_raw))]
 
             archive_tweets = list(filter(lambda t: datetime.datetime.strptime(t["created_at"], "%a %b %d %H:%M:%S +0000 %Y") < end_time, tweets))
-            archive_tweets.sort(key=lambda t: int(t["id"]), reverse=True)
 
             if archive_last_id is not None:
                 archive_tweets = list(filter(lambda t: int(t["id"]) < int(archive_last_id), archive_tweets))
+
+            archive_tweets.sort(key=lambda t: int(t["id"]), reverse=True)
 
             return archive_tweets
         except Exception as e:
@@ -171,8 +170,6 @@ class TweetPurger:
             try:
                 self.client.delete_tweet(tweet_id, user_auth=False)
             except tweepy.errors.Unauthorized as e:
-                print("access_token expired!")
-
                 self.renew_token()
                 continue
             except Exception as e:
@@ -184,7 +181,7 @@ class TweetPurger:
         return True
 
 
-    def run(self, delete_like_threshold=50, delete_days_threshold=7, archive=False, archive_path="tweet.js", archive_last_id=None):
+    def run(self, delete_like_threshold=50, delete_days_threshold=7, archive=False, archive_path="tweet.js"):
         print(f"Purging Tweets for @{self.user} ({self.user.id})")
 
         deleted_tweets = 0
@@ -197,6 +194,12 @@ class TweetPurger:
             if archive:
                 print(f"Source: Archive ({os.path.basename(archive_path)})")
 
+                try:
+                    with open("archive_last_id") as f:
+                        archive_last_id = f.read()
+                except:
+                    archive_last_id = None
+
                 archive_path = os.path.abspath(archive_path)
 
                 for tweet in self.parse_archive(archive_path, end_time, archive_last_id):
@@ -205,12 +208,14 @@ class TweetPurger:
                             if self.delete_tweet(tweet["id"]):
                                 self.config["defaults"]["archive_last_id"] = tweet["id"]
 
-                                with open(self.config_path, "w") as f:
-                                    self.config.write(f)
-            
+                                with open("archive_last_id", "w") as f:
+                                    f.write(tweet["id"])
+        
                                 deleted_tweets += 1
 
                         print(tweet["id"])
+
+                os.remove("archive_last_id")
             else:
                 print("Source: API")
 
@@ -241,7 +246,6 @@ if __name__ == "__main__":
     parser.add_argument("--auth-timeout")
     parser.add_argument("--archive", action="store_true")
     parser.add_argument("--archive-path")
-    parser.add_argument("--archive-last-id")
     parser.add_argument("--config-path")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -258,7 +262,6 @@ if __name__ == "__main__":
             config[section] = {}
 
     archive_path = os.path.abspath(args.archive_path or config["defaults"].get("archive_path", "tweet.js"))
-    archive_last_id = args.archive_last_id or config["defaults"].get("archive_last_id", None)
 
     auth_http_host = args.auth_http_host or config["defaults"].get("auth_http_host", "127.0.0.1")
     auth_http_port = int(args.auth_http_port or config["defaults"].get("auth_http_port", 33333))
@@ -284,4 +287,4 @@ if __name__ == "__main__":
         config.write(f)
 
     tweet_purger = TweetPurger(client_id, client_secret, consumer_secret, access_token, refresh_token, dry_run, config_path, auth_http_host, auth_http_port, auth_timeout)
-    tweet_purger.run(delete_like_threshold, delete_days_threshold, archive, archive_path, archive_last_id)
+    tweet_purger.run(delete_like_threshold, delete_days_threshold, archive, archive_path)

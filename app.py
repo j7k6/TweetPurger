@@ -25,7 +25,7 @@ class OAuth2UserHandler(tweepy.OAuth2UserHandler):
 
 
 class TweetPurger:
-    def __init__(self, client_id, client_secret, consumer_secret, access_token=None, refresh_token=None, dry_run=False, config_path="config.ini", auth_http_host="127.0.0.1", auth_http_port="33333", auth_timeout=60):
+    def __init__(self, client_id, client_secret, consumer_secret, access_token=None, refresh_token=None, dry_run=False, config_path="config.ini", auth_http_host="127.0.0.1", auth_http_port="33333", auth_timeout=60, no_gui=False):
         self.client_id = client_id
         self.client_secret = client_secret
         self.consumer_secret = consumer_secret
@@ -33,6 +33,7 @@ class TweetPurger:
         self.refresh_token = refresh_token
 
         self.dry_run = dry_run
+        self.no_gui = no_gui
 
         self.auth_http_host = auth_http_host
         self.auth_http_port = auth_http_port
@@ -53,10 +54,10 @@ class TweetPurger:
             client_secret=self.client_secret
         )
 
-        self.check_auth()
+        self.auth()
 
 
-    def check_auth(self):
+    def auth(self):
         if self.access_token is not None:
             if self.refresh_token is not None:
                 self.renew_token()
@@ -72,7 +73,7 @@ class TweetPurger:
             self.get_token()
 
 
-    def auth_handler(self, auth_response):
+    def token_handler(self, auth_response):
         if self.auth_server is not None:
             try:
                 self.auth_server.shutdown()
@@ -98,36 +99,45 @@ class TweetPurger:
     def get_token(self):
         os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
-        @Request.application
-        def get_auth(request):
-            auth_response_uri = f"{self.redirect_uri}/?{request.query_string.decode()}"
-            auth = self.oauth2_user_handler.fetch_token(auth_response_uri)
-
-            threading.Thread(target=lambda: self.auth_handler(auth)).start()
-
-            return Response("success\n<meta http-equiv=\"refresh\" content=\"3; URL=http://twitter.com/\">", mimetype="text/html")
-
-        logging.getLogger("werkzeug").setLevel(logging.ERROR)
-
-        self.auth_server = make_server(self.auth_http_host, self.auth_http_port, get_auth)
-        threading.Thread(target=self.auth_server.serve_forever).start()
-
         auth_url = self.oauth2_user_handler.get_authorization_url()
 
-        print(f"Opening {auth_url}...")
+        if self.no_gui:
+            print(f"auth_url: {auth_url}")
 
-        webbrowser.open(auth_url, new=0, autoraise=True)
+            auth_response_uri = input("auth_response_uri: ")
+            auth = self.oauth2_user_handler.fetch_token(auth_response_uri)
+            self.token_handler(auth)
 
-        start_time = time.time()
-
-        while (time.time() - self.auth_timeout) < start_time:
-            if self.access_token is not None:
-                break
-
-            time.sleep(1)
+            return
         else:
-            print("Timeout!")
-            exit()
+            @Request.application
+            def get_auth(request):
+                auth_response_uri = f"{self.redirect_uri}/?{request.query_string.decode()}"
+                auth = self.oauth2_user_handler.fetch_token(auth_response_uri)
+
+                threading.Thread(target=lambda: self.token_handler(auth)).start()
+
+                return Response("success\n<meta http-equiv=\"refresh\" content=\"3; URL=http://twitter.com/\">", mimetype="text/html")
+
+            logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+            self.auth_server = make_server(self.auth_http_host, self.auth_http_port, get_auth)
+            threading.Thread(target=self.auth_server.serve_forever).start()
+
+            print(f"Opening {auth_url}...")
+
+            webbrowser.open(auth_url, new=0, autoraise=True)
+
+            start_time = time.time()
+
+            while (time.time() - self.auth_timeout) < start_time:
+                if self.access_token is not None:
+                    break
+
+                time.sleep(1)
+            else:
+                print("Timeout!")
+                exit()
 
 
     def renew_token(self):
@@ -135,7 +145,7 @@ class TweetPurger:
 
         auth = self.oauth2_user_handler.refresh_token(self.refresh_token)
 
-        self.auth_handler(auth)
+        self.token_handler(auth)
 
 
     def parse_archive(self, archive_path, end_time=datetime.datetime.now(), archive_last_id=None):
@@ -248,10 +258,13 @@ if __name__ == "__main__":
     parser.add_argument("--archive-path")
     parser.add_argument("--config-path")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-gui", action="store_true")
     args = parser.parse_args()
 
     archive = args.archive
     dry_run = args.dry_run
+    no_gui = bool(args.no_gui or os.environ.get("SSH_CONNECTION"))
+
     config_path = os.path.abspath(args.config_path or "config.ini")
 
     config = configparser.ConfigParser(interpolation=None)
@@ -286,5 +299,5 @@ if __name__ == "__main__":
     with open("config.ini", "w") as f:
         config.write(f)
 
-    tweet_purger = TweetPurger(client_id, client_secret, consumer_secret, access_token, refresh_token, dry_run, config_path, auth_http_host, auth_http_port, auth_timeout)
+    tweet_purger = TweetPurger(client_id, client_secret, consumer_secret, access_token, refresh_token, dry_run, config_path, auth_http_host, auth_http_port, auth_timeout, no_gui)
     tweet_purger.run(delete_like_threshold, delete_days_threshold, archive, archive_path)

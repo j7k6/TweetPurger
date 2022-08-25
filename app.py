@@ -8,6 +8,7 @@ import datetime
 import json
 import logging
 import os 
+import sys
 import threading
 import time
 import tweepy
@@ -74,6 +75,8 @@ class TweetPurger:
 
 
     def token_handler(self, auth_response):
+        time.sleep(1)
+
         if self.auth_server is not None:
             try:
                 self.auth_server.shutdown()
@@ -101,9 +104,9 @@ class TweetPurger:
 
         auth_url = self.oauth2_user_handler.get_authorization_url()
 
-        if self.no_gui:
-            print(f"auth_url: {auth_url}")
+        logger.info(f"auth_url: {auth_url}")
 
+        if self.no_gui:
             auth_response_uri = input("auth_response_uri: ")
             auth = self.oauth2_user_handler.fetch_token(auth_response_uri)
             self.token_handler(auth)
@@ -124,8 +127,6 @@ class TweetPurger:
             self.auth_server = make_server(self.auth_http_host, self.auth_http_port, get_auth)
             threading.Thread(target=self.auth_server.serve_forever).start()
 
-            print(f"Opening {auth_url}...")
-
             webbrowser.open(auth_url, new=0, autoraise=True)
 
             start_time = time.time()
@@ -136,12 +137,12 @@ class TweetPurger:
 
                 time.sleep(1)
             else:
-                print("Timeout!")
+                logger.error("Timeout!")
                 exit()
 
 
     def renew_token(self):
-        print("Renewing access_token...")
+        logger.info("Renewing access_token...")
 
         auth = self.oauth2_user_handler.refresh_token(self.refresh_token)
 
@@ -165,8 +166,8 @@ class TweetPurger:
 
             return archive_tweets
         except Exception as e:
-            print(e)
-            print("Failed to read Archive!")
+            logger.crit(error)
+            logger.error("Failed to read Archive!")
 
             return []
 
@@ -183,7 +184,7 @@ class TweetPurger:
                 self.renew_token()
                 continue
             except Exception as e:
-                print(e)
+                logger.error(e)
                 return False
             else:
                 break
@@ -191,18 +192,21 @@ class TweetPurger:
         return True
 
 
-    def run(self, delete_like_threshold=50, delete_days_threshold=7, archive=False, archive_path="tweet.js"):
-        print(f"Purging Tweets for @{self.user} ({self.user.id})")
+    def run(self, delete_like_threshold=50, delete_days_threshold=7, archive=False, archive_path="tweet.js", ignore_bookmarks=False):
+        logger.info(f"Purging Tweets for @{self.user} ({self.user.id})")
 
         deleted_tweets = 0
 
         try:
-            bookmarks = self.get_bookmarks()
+            if ignore_bookmarks:
+                bookmarks = []
+            else:
+                bookmarks = self.get_bookmarks()
 
             end_time = datetime.datetime.now() - datetime.timedelta(days=delete_days_threshold)
 
             if archive:
-                print(f"Source: Archive ({os.path.basename(archive_path)})")
+                logger.info(f"Source: Archive ({os.path.basename(archive_path)})")
 
                 try:
                     with open("archive_last_id") as f:
@@ -223,11 +227,11 @@ class TweetPurger:
         
                                 deleted_tweets += 1
 
-                        print(tweet["id"])
+                        logger.info(tweet["id"])
 
                 os.remove("archive_last_id")
             else:
-                print("Source: API")
+                logger.info("Source: API")
 
                 for tweet in tweepy.Paginator(self.client.get_users_tweets, self.user.id, tweet_fields=["public_metrics"], end_time=end_time, max_results=100).flatten():
                     if tweet.data["public_metrics"]["like_count"] < delete_like_threshold and not int(tweet.data["id"]) in bookmarks: 
@@ -235,34 +239,55 @@ class TweetPurger:
                             if self.delete_tweet(tweet.data["id"]):
                                 deleted_tweets += 1
 
-                        print(tweet.data["id"])
+                        logger.info(tweet.data["id"])
         except Exception as e:
-            print(e)
+            logger.error(e)
 
-        print(f"Done! Deleted {deleted_tweets} Tweets...")
+        logger.info(f"Done! Deleted {deleted_tweets} Tweets...")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TweetPurger")
-    parser.add_argument("--client-id")
-    parser.add_argument("--client-secret")
-    parser.add_argument("--consumer-secret")
-    parser.add_argument("--access-token")
-    parser.add_argument("--refresh-token")
-    parser.add_argument("--delete-like-threshold")
-    parser.add_argument("--delete-days-threshold")
-    parser.add_argument("--auth-http-host")
-    parser.add_argument("--auth-http-port")
-    parser.add_argument("--auth-timeout")
+    parser.add_argument("--client-id", type=str)
+    parser.add_argument("--client-secret", type=str)
+    parser.add_argument("--consumer-secret", type=str)
+    parser.add_argument("--access-token", type=str)
+    parser.add_argument("--refresh-token", type=str)
+    parser.add_argument("--delete-like-threshold", type=int)
+    parser.add_argument("--delete-days-threshold", type=int)
+    parser.add_argument("--auth-http-host", type=str)
+    parser.add_argument("--auth-http-port", type=int)
+    parser.add_argument("--auth-timeout", type=int)
     parser.add_argument("--archive", action="store_true")
-    parser.add_argument("--archive-path")
-    parser.add_argument("--config-path")
+    parser.add_argument("--archive-path", type=str)
+    parser.add_argument("--config-path", type=str)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-gui", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--nuke", action="store_true")
     args = parser.parse_args()
+
+    verbose = args.verbose
+    quiet = args.quiet
+
+    logger = logging.getLogger(__name__)
+
+    if verbose:
+        logger.setLevel(logging.DEBUG)
+    elif quiet:
+        logger.setLevel(logging.CRITICAL)
+    else:
+        logger.setLevel(logging.INFO)
+
+    formatter = logging.Formatter("%(message)s")
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
     archive = args.archive
     dry_run = args.dry_run
+    nuke = args.nuke
     no_gui = bool(args.no_gui or os.environ.get("SSH_CONNECTION"))
 
     config_path = os.path.abspath(args.config_path or "config.ini")
@@ -274,14 +299,20 @@ if __name__ == "__main__":
         if not section in config:
             config[section] = {}
 
+    ignore_bookmarks = False
+    delete_like_threshold = int(args.delete_like_threshold or config["defaults"].get("delete_like_threshold", 50))
+    delete_days_threshold = int(args.delete_days_threshold or config["defaults"].get("delete_days_threshold", 7))
+
+    if nuke:
+        ignore_bookmarks = True
+        delete_like_threshold = 0
+        delete_days_threshold = 0
+
     archive_path = os.path.abspath(args.archive_path or config["defaults"].get("archive_path", "tweet.js"))
 
     auth_http_host = args.auth_http_host or config["defaults"].get("auth_http_host", "127.0.0.1")
     auth_http_port = int(args.auth_http_port or config["defaults"].get("auth_http_port", 33333))
     auth_timeout = int(args.auth_timeout or config["defaults"].get("auth_timeout", 60))
-
-    delete_like_threshold = int(args.delete_like_threshold or config["defaults"].get("delete_like_threshold", 50))
-    delete_days_threshold = int(args.delete_days_threshold or config["defaults"].get("delete_days_threshold", 7))
 
     client_id = args.client_id or config["auth"].get("client_id", None)
     client_secret = args.client_secret or config["auth"].get("client_secret", None)
@@ -300,4 +331,4 @@ if __name__ == "__main__":
         config.write(f)
 
     tweet_purger = TweetPurger(client_id, client_secret, consumer_secret, access_token, refresh_token, dry_run, config_path, auth_http_host, auth_http_port, auth_timeout, no_gui)
-    tweet_purger.run(delete_like_threshold, delete_days_threshold, archive, archive_path)
+    tweet_purger.run(delete_like_threshold, delete_days_threshold, archive, archive_path, ignore_bookmarks)
